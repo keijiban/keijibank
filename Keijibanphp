@@ -1,0 +1,667 @@
+<h1>take yasuhiro</h1>
+
+<?php
+//------------------------------------------------------------------------------
+//    CommentPP, Thread type bulletin board system.
+//    Copyright (C) 2012-2014 Kaga, Hiroaki
+//
+//    This program is free software; you can redistribute it and/or modify
+//    it under the terms of the GNU General Public License as published by
+//    the Free Software Foundation; either version 2 of the License, or
+//    (at your option) any later version.
+//
+//    This program is distributed in the hope that it will be useful,
+//    but WITHOUT ANY WARRANTY; without even the implied warranty of
+//    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+//    GNU General Public License for more details.
+//
+//    You should have received a copy of the GNU General Public License
+//    along with this program; if not, write to the Free Software
+//    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+//------------------------------------------------------------------------------
+//    index.php
+//------------------------------------------------------------------------------
+
+mb_language("Japanese");
+mb_internal_encoding("UTF-8");
+
+require_once('./config.php');
+
+require_once(SMARTY_DIR . 'Smarty.class.php');
+require_once('./util.php');
+
+session_name(SESSION_NAME);
+session_start();
+
+$session_userid = isset($_SESSION['userid']) ? $_SESSION['userid'] : '';
+$func = isset($_REQUEST['func']) ? $_REQUEST['func'] : '';
+//_access_log($func);
+$members_only = MEMBERS_ONLY;
+if (($func != 'login') && ($func != 'admit') && ($func != 'logout')) {
+	if ($members_only && ($session_userid == '')) {	// 会員制でログインされていない場合はログイン画面表示
+		 $func = 'login';
+	}
+}
+if ($func != '' && !preg_match('/^[a-zA-Z]+$/', $func)) {
+	_error('main:パラメーターが不正です');
+}
+
+if ($session_userid == '' && $func == 'delete') {
+	_error('権限がありません');
+}
+
+if ($func == 'login') {
+	_login();
+}
+else if ($func == 'admit') {
+	_admit();
+}
+else if ($func == 'logout') {
+	_logout();
+}
+else if ($func == 'post') {
+	_post($session_userid);
+}
+else if ($func == 'reply') {
+	_reply($session_userid);
+}
+else if ($func == 'delete') {
+	_delete();
+}
+else {
+	_home($session_userid);
+}
+
+// ログイン
+function _login() {
+	_login_form('', '', '');
+}
+
+// ログインフォームを表示
+function _login_form($userid, $userpw, $msg) {
+
+	$userid = htmlspecialchars($userid, ENT_QUOTES);
+	$userpw = '';	// 必ず初期化
+	$msg = htmlspecialchars($msg, ENT_QUOTES);
+
+	$smarty = new Smarty();
+	$smarty->template_dir = TEMPLATE_DIR . 'templates/';
+	$smarty->compile_dir = TEMPLATE_DIR . 'templates_c/';
+
+	$smarty->assign("site_title", SITE_TITLE);
+	$smarty->assign("site_description", SITE_DESCRIPTION);
+	$smarty->assign("site_url", SITE_URL);
+	$smarty->assign("msg", $msg);
+	$smarty->assign("userid", $userid);
+	$smarty->assign("userpw", $userpw);
+
+	$smarty->display("login.tpl");
+
+	exit();
+}
+
+// ユーザー認証
+function _admit() {
+	$userid = isset($_POST['userid']) ? $_POST['userid'] : '';
+	$userpw = isset($_POST['userpw']) ? $_POST['userpw'] : '';
+	$md5pw = md5($userpw);
+
+	$count = 0;
+
+	try{
+		$dbh =_db_connect();
+
+		$sth = $dbh->prepare("SELECT COUNT(*) AS count FROM account WHERE userid = ? AND password = ?");
+		$sth->bindParam(1, $userid, PDO::PARAM_STR);
+		$sth->bindParam(2, $md5pw, PDO::PARAM_STR);
+		$sth->execute();
+		$row = $sth->fetch();
+		$count = $row['count'];
+	}
+	catch (PDOException $e) {
+		_error('Error:' . $e->getMessage());
+	}
+
+	$dbh = null;
+
+	if ($count) {
+		$_SESSION['userid'] = $userid;
+	}
+	else {
+		_login_form($userid, $userpw, 'ユーザーIDまたはパスワードが間違っています');
+	}
+
+	header('Location: ./');
+	exit();
+}
+
+// ログアウト
+function _logout() {
+	$_SESSION = array();
+	if (isset($COOKIE[session_name()])) {
+		setcookie(session_name(), '', time()-420000, '/');
+	}
+	session_destroy();
+
+	header('Location: ./');
+	exit();
+}
+
+// ホームページの表示
+function _home($session_userid) {
+
+	$thread = isset($_REQUEST['thread']) ? $_REQUEST['thread'] : '';
+	$comment = isset($_REQUEST['comment']) ? $_REQUEST['comment'] : '';
+	$num = isset($_REQUEST['num']) ? $_REQUEST['num'] : '';
+	$page = isset($_REQUEST['page']) ? $_REQUEST['page'] : '1';
+
+	// パラメータチェック
+	if ($thread != '' && !preg_match('/^[0-9]+$/', $thread)) {
+		_error('_home:パラメーターが不正です');
+	}
+	if ($comment != '' && !preg_match('/^[0-9,]+$/', $comment)) {
+		_error('_home:パラメーターが不正です');
+	}
+	if ($num != '' && !preg_match('/^[0-9,]+$/', $num)) {
+		_error('_home:パラメーターが不正です');
+	}	
+	if (!preg_match('/^[0-9]+$/', $page)) {
+		_error('_home:パラメーターが不正です');
+	}
+
+	_view_home($session_userid, $thread, $comment, $num, $page, '', '', '');
+}
+
+// リプライ
+function _reply($session_userid) {
+
+	$thread = isset($_REQUEST['thread']) ? $_REQUEST['thread'] : '';
+	$comment = isset($_REQUEST['comment']) ? $_REQUEST['comment'] : '';
+	$page = isset($_REQUEST['page']) ? $_REQUEST['page'] : '1';
+
+	// パラメータチェック
+	if ($thread != '' && !preg_match('/^[0-9]+$/', $thread)) {
+		_error('_reply:パラメーターが不正です');
+	}
+	if ($comment != '' && !preg_match('/^[0-9,]+$/', $comment)) {
+		_error('_reply:パラメーターが不正です');
+	}
+	if (!preg_match('/^[0-9]+$/', $page)) {
+		_error('_reply:パラメーターが不正です');
+	}
+
+	try{
+		$dbh =_db_connect();
+
+		$sth = $dbh->prepare("SELECT * FROM comment WHERE status = 1 AND commentid = ?");
+		$sth->bindParam(1, $comment, PDO::PARAM_INT);
+		$sth->execute();
+		$row = $sth->fetch();
+
+		$body = $row['body'];
+		$commentnum = $row['commentnum'];
+
+		// リプライコメント用の本文を作成
+		$pattern  = '/^(.*)/m';
+		$replace  = '> \\1';
+		$body = preg_replace($pattern, $replace, $body);	// 引用記号を追加
+		$body = ">>" . $commentnum . "\n\n" . $body;	// >>コメント番号を追加
+
+	}
+	catch (PDOException $e) {
+		_error('Error:' . $e->getMessage());
+	}
+
+	$dbh = null;
+
+	_view_home($session_userid, $thread, $comment, '', $page, '', $body, '');
+}
+
+
+// ホームページの表示
+function _view_home($session_userid, $thread, $comment, $num, $page, $name, $body, $msg) {
+
+	$count = 0;
+	$current_thread = array();
+	$thread_list = array();
+	$tag_list = array();
+
+	try{
+		$dbh =_db_connect();
+
+		$ranking_num = RANKING_NUMBER;
+
+//		$sql  = "SELECT thread.*, (SELECT COUNT(*) FROM comment WHERE comment.status = 1 AND thread.threadid = comment.threadid) AS commentnum";
+//		$sql .= " FROM thread";
+//		$sql .= " WHERE thread.status = 1 ";
+//		$sql .= " ORDER BY commentnum DESC ";
+//		$sql .= " LIMIT 0, ?";
+
+		// 今日のアクセスランキング
+		$sql  = "SELECT thread.*, (SELECT COUNT(threadid) FROM accesslog WHERE DATE(accesslog.accessdate) = DATE(NOW()) AND thread.threadid = accesslog.threadid GROUP BY threadid) AS threadnum";
+		$sql .= " FROM thread";
+		$sql .= " WHERE thread.status = 1 ";
+		$sql .= " ORDER BY threadnum DESC, thread.threadid DESC";
+		$sql .= " LIMIT 0, ?";
+
+		$sth = $dbh->prepare($sql);
+		$sth->bindParam(1, $ranking_num, PDO::PARAM_INT);
+		$sth->execute();
+
+		while ($row = $sth->fetch()) {
+			$thread_item = array();
+			$thread_item['threadid'] = $row['threadid'];
+			$thread_item['name'] = $row['name'];
+			if ($row['name'] == '') {
+				if ($row['userid'] != '') {
+					$thread_item['name'] = $row['userid'];
+				}
+				else {
+					$thread_item['name'] = ANONYMOUS;
+				}
+			}
+			$thread_item['title'] = $row['title'];
+			$thread_item['body'] = _url_link(_nl2br($row['body']));
+			$thread_item['postdate'] = $row['postdate'];
+			$thread_item['threadnum'] = $row['threadnum'];
+			if ($thread_item['threadnum'] == '') {
+				$thread_item['threadnum'] = 0;
+			}
+			$thread_list[] = $thread_item;
+			if ($count == 0) {
+				$current_thread = $thread_item;
+			}
+			$count++;
+		}
+		if ($count == 0) {
+			header('Location: ./thread.php?func=new');
+			exit();
+		}
+
+		if ($thread != "") {
+			$sth = $dbh->prepare("SELECT * FROM thread WHERE status = 1 AND threadid = ?");
+			$sth->bindParam(1, $thread, PDO::PARAM_INT);
+			$sth->execute();
+			$row = $sth->fetch();
+			$current_thread['threadid'] = $row['threadid'];
+			$current_thread['name'] = $row['name'];
+			if ($row['name'] == '') {
+				if ($row['userid'] != '') {
+					$current_thread['name'] = $row['userid'];
+				}
+				else {
+					$current_thread['name'] = ANONYMOUS;
+				}
+			}
+			$current_thread['title'] = $row['title'];
+			$current_thread['body'] = _url_link(_nl2br($row['body']));
+			$current_thread['postdate'] = $row['postdate'];
+		}
+		else {
+			$thread = $current_thread['threadid'];
+		}
+
+		// 人気タグを取得
+		$sql = "SELECT tag, COUNT(threadid) AS threadnum FROM tags GROUP BY tag ORDER BY threadnum DESC";
+		$sth = $dbh->query($sql);
+
+		$count = 0;
+		while ($row = $sth->fetch()) {
+			$tag_item = array();
+			$tag_item['tag'] = $row['tag'];
+			$tag_item['enctag'] = urlencode($row['tag']);
+			$tag_item['threadnum'] = $row['threadnum'];
+			$tag_list[] = $tag_item;
+//			_write_log("[tag 1 = " . $row['tag'] . "]");	// for debug
+//			_write_log("[tag 2 = " . $tag_item['tag'] . "]");	// for debug
+			$count++;
+			if ($count >= 10) {
+				break;
+			}
+		}
+
+		_access_log($thread);	// ホームページの表示時のみアクセスログを記録
+
+		$list_title = LIST_TITLE;
+		// 検索条件を設定
+		$cond = " AND threadid = ?";
+		$item_list = array();
+		$itemnum = 0;
+		if ($comment != "") {	// コメントIDが指定されているとき
+			$item_list = explode(',', $comment);
+			$itemnum = count($item_list);
+			$in = '';
+			for ($i = 0; $i < $itemnum; $i++) {
+				if ($in != '') {
+					$in .= ',';
+				}
+				$in .= '?';
+			}
+			$cond .= " AND commentid IN (" . $in .") ";
+			$list_title = '選択されたコメント';
+		}
+		if ($num != "") {	// コメント番号が指定されているとき
+			$item_list[] = $num;
+			$itemnum = count($item_list);
+			$cond .= " AND commentnum = ? ";
+			$list_title = '選択されたコメント';
+		}
+
+		$sql = "SELECT COUNT(*) AS commentcount FROM comment WHERE status = 1";
+		$sql .= $cond;
+
+		$sth = $dbh->prepare($sql);
+		$sth->bindParam(1, $thread, PDO::PARAM_INT);
+		for ($i = 0; $i < $itemnum; $i++) {
+			$sth->bindParam($i + 2, $item_list[$i], PDO::PARAM_INT);
+		}
+		$sth->execute();
+		$row = $sth->fetch();
+		$recnum = $row['commentcount'];
+
+		$pagenavi = '';
+		$comment_list = array();
+		$itemnum = ITEM_NUMBER;
+		if ($recnum > 0) {
+			$startpos = ($page - 1) * $itemnum;
+			$pagenum = floor($recnum / $itemnum); 
+			if ($recnum / $itemnum > $pagenum) {
+				$pagenum++;
+			}
+
+			$sql = "SELECT * FROM comment WHERE status = 1 ";
+			$sql .= $cond;
+			$sql .= " ORDER BY commentid DESC";
+			$sql .= " LIMIT " . $startpos . ", " . $itemnum;
+
+			$sth = $dbh->prepare($sql);
+			$sth->bindParam(1, $thread, PDO::PARAM_INT);
+			for ($i = 0; $i < $itemnum; $i++) {
+				$sth->bindParam($i + 2, $item_list[$i], PDO::PARAM_INT);
+			}
+			$sth->execute();
+
+			$count = 0;
+			while ($row = $sth->fetch()) {
+
+				$comment_item = array();
+				$comment_item['commentid'] = $row['commentid'];
+				$comment_item['userid'] = $row['userid'];
+				$comment_item['name'] = $row['name'];
+				if ($row['name'] == '') {
+					if ($row['userid'] != '') {
+						$comment_item['name'] = $row['userid'];
+					}
+					else {
+						$comment_item['name'] = ANONYMOUS;
+					}
+				}
+
+				$comment_item['encname'] = urlencode($comment_item['name']);
+				$comment_item['postdate'] = $row['postdate'];
+				$comment_item['body'] = _url_link(_nl2br($row['body']));
+				$comment_item['threadid'] = $row['threadid'];
+				$comment_item['commentnum'] = $row['commentnum'];
+
+				// URL変換
+				$comment_item['body'] = preg_replace('/>>([0-9]+)/', '<a href="./?thread='. $thread . '&num=\\1">&gt;&gt;\\1</a>', $comment_item['body']);
+
+				// 関連コメントの処理
+				$idlist = _get_relate_comment($dbh, $row['commentid']);
+				$trunk = $row['trunk'];
+				$relation = '';
+				if ($trunk != 0) {
+					$relation = $trunk;
+				}
+				if ($idlist != '') {
+					if ($relation != '') {
+						$relation .= ',';
+					}
+					$relation = $idlist;
+				}
+				if ($relation != '') {	// 該当コメントも追加
+					$relation = $row['commentid'] . ',' . $relation;
+				}
+				$comment_item['relation'] = $relation;
+
+				$comment_list[] = $comment_item;
+				$count++;
+			}
+
+			# ページナビゲーションの作成
+			$base = 1;
+			$currentnum = ($pagenum < PAGE_NUMBER) ? $pagenum : PAGE_NUMBER;
+			if ($page > PAGE_NUMBER) {
+				$base = $page - PAGE_NUMBER - $base;
+			}
+
+			$pagelist = array();
+			for ($i = $base; $i < ($base + $currentnum); $i++) {
+				$pagelist[] = $i;
+			}
+
+			$current = '';
+			foreach ($pagelist as $pagecount) {
+				if ($pagecount != $page) {
+					$current .= "<a href=\"./?page=" . $pagecount . "&thread=$thread\">" . $pagecount . "</a> ";
+				}
+				else {
+					$current .= $pagecount . " ";
+				}
+			}
+
+			$top = '';
+			if ($page > PAGE_NUMBER) {
+				$top = "<a href=\"./?page=1&thread=$thread\">&lt;&lt;</a> ";
+			}
+			$last = '';
+			if ($pagenum > PAGE_NUMBER) {
+				$last = "<a href=\"./?page=" . $pagenum . "&thread=$thread\">&gt;&gt;</a>";
+			}
+			$pagenavi = <<<EOL
+<div class="pageedge">Page : $top $current $last</div>
+<div style="clear:both"></div>
+EOL;
+		}
+
+	}
+	catch (PDOException $e) {
+		_error('Error:' . $e->getMessage());
+	}
+
+	$dbh = null;
+
+	// XSS対策
+	$body = htmlspecialchars($body, ENT_QUOTES);
+	$name = htmlspecialchars($name, ENT_QUOTES);
+	$msg = htmlspecialchars($msg, ENT_QUOTES);
+
+	// 昨日の日付を取得
+	$yesterday = date('Y-m-d', (time() - 86400));
+	$yesterday = substr($yesterday, 0, 4) . substr($yesterday, 5, 2) . substr($yesterday, 8, 2);
+
+	// 先月の日付を取得
+	$lastmonth = date('Y-m-d', strtotime('-1 month'));
+	$lastmonth = substr($lastmonth, 0, 4) . substr($lastmonth, 5, 2) . substr($lastmonth, 8, 2);
+
+	$smarty = new Smarty();
+	$smarty->template_dir = TEMPLATE_DIR . 'templates/';
+	$smarty->compile_dir = TEMPLATE_DIR . 'templates_c/';
+
+	// コメント一覧を逆順にする
+	$comment_list = array_reverse($comment_list);
+
+	$smarty->assign("site_title", SITE_TITLE);
+	$smarty->assign("site_description", SITE_DESCRIPTION);
+	$smarty->assign("site_url", SITE_URL);
+	$smarty->assign("list_title", $list_title);
+	$smarty->assign("sessionuser", $session_userid);
+	$smarty->assign("yesterday", $yesterday);
+	$smarty->assign("lastmonth", $lastmonth);
+	$smarty->assign("thread", $thread);
+	$smarty->assign("comment", $comment);
+	$smarty->assign("msg", $msg);
+	$smarty->assign("commentid", $comment);
+	$smarty->assign("body", $body);
+	$smarty->assign("name", $name);
+	$smarty->assign("page", $page);
+	$smarty->assign("comment_list", $comment_list);
+	$smarty->assign("thread_list", $thread_list);
+	$smarty->assign("current_thread", $current_thread);
+	$smarty->assign("pagenavi", $pagenavi);
+	$smarty->assign("tag_list", $tag_list);
+	$smarty->display("home.tpl");
+
+	exit();
+}
+
+// 関連コメントを取得
+function _get_relate_comment($dbh, $commentid) {
+
+	$idlist = '';
+
+	try{
+		$sth = $dbh->prepare("SELECT commentid FROM comment WHERE status = 1 AND trunk = ?");
+		$sth->bindParam(1, $commentid, PDO::PARAM_INT);
+		$sth->execute();
+		$row = $sth->fetch();
+		if ($idlist != '') {
+			$idlist .= ',';
+		}
+		$idlist .= $row['commentid'];
+	}
+	catch (PDOException $e) {
+		_error('Error:' . $e->getMessage());
+	}
+
+	return $idlist;
+}
+
+// スレッドの新しいコメント番号を取得
+function _new_commentnum($dbh, $threadid) {
+
+	$num = 0;
+
+	try{
+		$sth = $dbh->prepare("SELECT MAX(commentnum) AS commentnum FROM comment WHERE threadid = ?");
+		$sth->bindParam(1, $threadid, PDO::PARAM_INT);
+		$sth->execute();
+		$row = $sth->fetch();
+		$num = $row['commentnum'];
+	}
+	catch (PDOException $e) {
+		_error('Error:' . $e->getMessage());
+	}
+
+	return $num + 1;
+}
+
+// コメントを追加
+function _post($session_userid) {
+
+	$name = isset($_POST['name']) ? $_POST['name'] : '';
+	$body = isset($_POST['body']) ? $_POST['body'] : '';
+	$threadid = isset($_POST['threadid']) ? $_POST['threadid'] : '';
+	if ($threadid == '' || !preg_match('/^[0-9]+$/', $threadid)) {
+		_error('_post:パラメーターが不正です');
+	}
+	$page = isset($_POST['page']) ? $_POST['page'] : '1';
+	if (!preg_match('/^[0-9]+$/', $page)) {
+		_error('_post:パラメーターが不正です');
+	}
+	$trunk = isset($_POST['commentid']) ? $_POST['commentid'] : '';
+	if ($trunk != '' && !preg_match('/^[0-9]+$/', $trunk)) {
+		_error('_post:パラメーターが不正です');
+	}
+
+	// 入力チェック
+	if ($body == '') {
+		_view_home($session_userid, $threadid, '', $page, $name, $body, 'コメントの本文を入力してください');
+	}
+
+	// スパムチェック
+	if (_check_blacklist($body)) {
+		_write_spam($body);	//スパムを記録
+		_view_home($session_userid, $threadid, '', $page, $name, $body, 'ブラックリストに登録されています');
+	}
+
+	$dbh =_db_connect();
+
+	// コメント番号を取得
+	$newnum = _new_commentnum($dbh, $threadid);
+
+	try{
+		$dbh =_db_connect();
+
+		$sth = $dbh->prepare("INSERT INTO comment (userid, name, postdate, body, trunk, threadid, commentnum, ipaddr) VALUES (?, ?, now(), ?, ?, ?, ?, ?)");
+		$sth->bindParam(1, $session_userid, PDO::PARAM_STR);
+		$sth->bindParam(2, $name, PDO::PARAM_STR);
+		$sth->bindParam(3, $body, PDO::PARAM_STR);
+		$sth->bindParam(4, $trunk, PDO::PARAM_INT);
+		$sth->bindParam(5, $threadid, PDO::PARAM_INT);
+		$sth->bindParam(6, $newnum, PDO::PARAM_INT);
+		$sth->bindParam(7, $_SERVER["REMOTE_HOST"], PDO::PARAM_STR);
+		$sth->execute();
+	}
+	catch (PDOException $e) {
+		_error('Error:' . $e->getMessage());
+	}
+
+	$newcommentid = $dbh->lastInsertId();
+
+	$dbh = null;
+
+	if ($name == '') {
+		$name = '['.ANONYMOUS.']';
+	}
+
+	// 管理人にメールを送信
+	$threadurl = SITE_URL. '?thread=' . $threadid;
+	$subject = 'コメントが投稿されました';
+	$message = <<<EOM
+$threadurl
+に $name さんが以下のコメントを投稿しました。
+
+コメント本文：
+
+$body
+
+EOM;
+
+	_send_mail(WEBMASTER_EMAIL, WEBMASTER_EMAIL, $subject, $message);
+
+	header("Location: ./?thread=" . $threadid . "#" . $newnum);
+	exit();
+}
+
+// コメントの削除
+function _delete() {
+
+	$commentid = isset($_GET['comment']) ? $_GET['comment'] : '';
+	if (!preg_match('/^[0-9]+$/', $commentid)) {
+		_error('_delete:パラメーターが不正です');
+	}
+
+	$threadid = isset($_GET['thread']) ? $_GET['thread'] : '';
+	if (!preg_match('/^[0-9]+$/', $threadid)) {
+		_error('_delete:パラメーターが不正です');
+	}
+
+	try{
+		$dbh =_db_connect();
+
+		$sth = $dbh->prepare("UPDATE comment SET status = 0 WHERE commentid = ?");
+		$sth->bindParam(1, $commentid, PDO::PARAM_INT);
+		$sth->execute();
+	}
+	catch (PDOException $e) {
+		_error('Error:' . $e->getMessage());
+	}
+
+	$dbh = null;
+
+	header("Location: ./?thread=" . $threadid);
+	exit();
+}
+
+?>
