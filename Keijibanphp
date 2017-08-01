@@ -1,4 +1,4 @@
-<h1>take yasuhiro</h1>
+<?php <h1>take yasuhiro</h1> ?>
 <p>掲示板実験</p>
 
 <?php
